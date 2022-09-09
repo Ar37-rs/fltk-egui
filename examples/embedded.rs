@@ -4,6 +4,7 @@ use egui_backend::{
     fltk::{enums::*, prelude::*, *},
 };
 use fltk_egui as egui_backend;
+use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 
@@ -16,8 +17,8 @@ fn main() {
     app::set_font_size(20);
     let mut main_win =
         window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None).center_screen();
-    let mut gl_win = window::GlWindow::new(5, 5, main_win.w() - 200, main_win.h() - 10, None);
-    gl_win.set_mode(Mode::Opengl3);
+    let mut gl_win = window::Window::new(5, 5, main_win.w() - 200, main_win.h() - 10, None);
+    // gl_win.set_mode(Mode::Opengl3);
     gl_win.end();
     let mut col = group::Flex::default()
         .column()
@@ -47,7 +48,7 @@ fn main() {
     main_win.handle({
         let state = state.clone();
         let mut w = gl_win.clone();
-        move |double_win, ev| match ev {
+        move |_win, ev| match ev {
             enums::Event::Push
             | enums::Event::Released
             | enums::Event::KeyDown
@@ -56,10 +57,6 @@ fn main() {
             | enums::Event::Resize
             | enums::Event::Move
             | enums::Event::Drag => {
-                // Using "if let ..." for safety.
-                if double_win.damage() {
-                    double_win.clear_damage();
-                }
                 if let Ok(mut state) = state.try_borrow_mut() {
                     state.fuse_input(&mut w, ev);
                     true
@@ -112,6 +109,11 @@ fn main() {
             });
         });
 
+        // Using "if let ..." for safety.
+        if gl_win.damage() {
+            gl_win.clear_damage();
+        }
+
         if egui_output.repaint_after.is_zero() || state.window_resized() {
             state.fuse_output(&mut gl_win, egui_output.platform_output);
             let meshes = egui_ctx.tessellate(egui_output.shapes);
@@ -123,8 +125,8 @@ fn main() {
                 &egui_output.textures_delta,
             );
 
-            gl_win.swap_buffers();
-            gl_win.flush();
+            // gl_win.swap_buffers();
+            state.surface.swap_buffers(&state.gl_context).unwrap();
             app::awake();
         }
 

@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![warn(clippy::all)]
 
-use std::{sync::Arc, time::Instant};
+use std::{ffi::CString, num::NonZeroU32, sync::Arc, time::Instant};
 
 // Re-export dependencies.
 pub use egui;
@@ -13,22 +13,136 @@ pub use fltk;
 use fltk::{
     app, enums,
     prelude::{FltkError, ImageExt, WidgetExt, WindowExt},
-    window::GlWindow,
+    window::Window,
 };
-
+use glutin::{
+    context::{ContextAttributesBuilder, PossiblyCurrentContext},
+    prelude::{GlDisplay, NotCurrentGlContextSurfaceAccessor},
+    surface::{GlSurface, Surface, WindowSurface},
+};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle};
+mod support;
+use support::*;
 mod clipboard;
 mod egui_image;
 use clipboard::Clipboard;
 
+/// Stuct Compat for RawDisplayHandle 5.x
+///
+pub struct RdhCompat<'a>(&'a fltk::window::Window);
+
+/// Trait Compat for RawDisplayHandle 5.x
+///
+pub trait RawDisplayHandleExt {
+    fn raw_display_handle(&self) -> RawDisplayHandle;
+}
+
+impl RawDisplayHandleExt for fltk::window::Window {
+    fn raw_display_handle(&self) -> RawDisplayHandle {
+        RdhCompat(&self).raw_display_handle()
+    }
+}
+
+unsafe impl HasRawDisplayHandle for RdhCompat<'_> {
+    fn raw_display_handle(&self) -> RawDisplayHandle {
+        #[cfg(target_os = "windows")]
+        {
+            let mut dispaly_handle = raw_window_handle::WindowsDisplayHandle::empty();
+            dispaly_handle.display = fltk::app::display();
+            dispaly_handle.screen = self.0.screen_num();
+            return raw_window_handle::RawDisplayHandle::Windows(handle);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut dispaly_handle = raw_window_handle::AppKitDisplayHandle::empty();
+            dispaly_handle.display = fltk::app::display();
+            dispaly_handle.screen = self.0.screen_num();
+            return RawDisplayHandle::AppKit(handle);
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let mut dispaly_handle = raw_window_handle::AndroidDisplayHandle::empty();
+            dispaly_handle.display = fltk::app::display();
+            dispaly_handle.screen = self.0.screen_num();
+            return raw_window_handle::RawDisplayHandle::Android(handle);
+        }
+
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+        ))]
+        {
+            #[cfg(not(feature = "use-wayland"))]
+            {
+                let mut dispaly_handle = raw_window_handle::XlibDisplayHandle::empty();
+                dispaly_handle.display = fltk::app::display();
+                dispaly_handle.screen = self.0.screen_num();
+                return raw_window_handle::RawDisplayHandle::Xlib(dispaly_handle);
+            }
+
+            #[cfg(feature = "use-wayland")]
+            {
+                let mut dispaly_handle = raw_window_handle::WaylandDisplayHandle::empty();
+                dispaly_handle.display = fltk::app::display();
+                dispaly_handle.screen = self.0.screen_num();
+                return raw_window_handle::RawDisplayHandle::Wayland(dispaly_handle);
+            }
+        }
+    }
+}
+
 /// Construct the backend.
-pub fn with_fltk(win: &mut GlWindow) -> (Painter, EguiState) {
+pub fn with_fltk(win: &mut Window) -> (Painter, EguiState) {
     app::set_screen_scale(win.screen_num(), 1.);
     app::keyboard_screen_scaling(false);
-    let gl = unsafe { glow::Context::from_loader_function(|s| win.get_proc_address(s) as _) };
+    // let gl = unsafe { glow::Context::from_loader_function(|s| win.get_proc_address(s) as _) };
+    let raw_window_handle = win.raw_window_handle();
+    let gl_display = create_display(win.raw_display_handle(), raw_window_handle);
+    let template = config_template(raw_window_handle);
+    let config = unsafe { gl_display.find_configs(template).unwrap().next().unwrap() };
+    let surface = {
+        // let p = winit::platform::unix::register_xlib_error_hook;
+        let attrs = surface_attributes(&win);
+        unsafe { gl_display.create_window_surface(&config, &attrs).unwrap() }
+    };
+
+    // can send NotCurrentContext, but not Surface.
+    let context_attributes = ContextAttributesBuilder::new().build(Some(raw_window_handle));
+    let gl_context = unsafe {
+        gl_display
+            .create_context(&config, &context_attributes)
+            .unwrap()
+    };
+
+    // Make it current and load symbols.
+    let gl_context = gl_context.make_current(&surface).unwrap();
+
+    let gl = unsafe {
+        glow::Context::from_loader_function(|s| {
+            let symbol = CString::new(s).unwrap();
+            gl_display.get_proc_address(symbol.as_c_str()) as *const _
+        })
+    };
+
+    // Try setting vsync.
+    // if let Err(res) =
+    //     surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
+    // {
+    //     eprintln!("Error setting vsync: {:?}", res);
+    // }
+
     let painter = Painter::new(Arc::from(gl), None, "")
         .unwrap_or_else(|error| panic!("some OpenGL error occurred {}\n", error));
     let max_texture_side = painter.max_texture_side();
-    (painter, EguiState::new(&win, max_texture_side))
+    (
+        painter,
+        EguiState::new(&win, surface, max_texture_side, gl_context),
+    )
 }
 
 /// Frame time for FPS.
@@ -79,16 +193,25 @@ pub struct EguiState {
     /// Internal use case for fn window_resized()
     _window_resized: bool,
     pub max_texture_side: usize,
+    pub surface: Surface<WindowSurface>,
+    pub gl_context: PossiblyCurrentContext,
 }
 
 impl EguiState {
     /// Construct a new state
-    pub fn new(win: &GlWindow, max_texture_side: usize) -> EguiState {
+    pub fn new(
+        win: &Window,
+        surface: Surface<WindowSurface>,
+        max_texture_side: usize,
+        gl_context: PossiblyCurrentContext,
+    ) -> EguiState {
         let ppu = win.pixels_per_unit();
         let (width, height) = (win.width(), win.height());
         let rect = vec2(width as f32, height as f32) / ppu;
         let screen_rect = Rect::from_min_size(Pos2::new(0f32, 0f32), rect);
         EguiState {
+            gl_context,
+            surface,
             canvas_size: [width as u32, height as u32],
             clipboard: Clipboard::default(),
             fuse_cursor: FusedCursor::new(),
@@ -130,12 +253,12 @@ impl EguiState {
     }
 
     /// Conveniece method bundling the necessary components for input/event handling
-    pub fn fuse_input(&mut self, win: &mut GlWindow, event: enums::Event) {
+    pub fn fuse_input(&mut self, win: &mut Window, event: enums::Event) {
         input_to_egui(win, event, self);
     }
 
     /// Convenience method for outputting what egui emits each frame
-    pub fn fuse_output(&mut self, win: &mut GlWindow, egui_output: egui::PlatformOutput) {
+    pub fn fuse_output(&mut self, win: &mut Window, egui_output: egui::PlatformOutput) {
         if !egui_output.copied_text.is_empty() {
             self.clipboard.set(egui_output.copied_text);
         }
@@ -146,7 +269,7 @@ impl EguiState {
     }
 
     /// Convenience method for outputting what egui emits each frame (borrow PlatformOutput)
-    pub fn fuse_output_borrow(&mut self, win: &mut GlWindow, egui_output: &egui::PlatformOutput) {
+    pub fn fuse_output_borrow(&mut self, win: &mut Window, egui_output: &egui::PlatformOutput) {
         if !egui_output.copied_text.is_empty() {
             app::copy(&egui_output.copied_text);
         }
@@ -164,22 +287,27 @@ impl EguiState {
 
         // resize rect with canvas.
         let canvas_size = self.canvas_size;
-        let rect = vec2(canvas_size[0] as f32, canvas_size[1] as f32) / size;
+        let rect = vec2(canvas_size[0] as f32 / size, canvas_size[1] as f32 / size);
         self.input.screen_rect = Some(Rect::from_min_size(Default::default(), rect));
     }
 }
 
 /// Handles input/events from FLTK
 pub fn input_to_egui(
-    win: &mut GlWindow,
+    win: &mut Window,
     event: enums::Event,
     state: &mut EguiState,
     // painter: &mut Painter,
 ) {
     match event {
         enums::Event::Resize => {
-            state.canvas_size = [win.width() as u32, win.height() as u32];
-            state.set_visual_scale(state.pixels_per_point());
+            state.surface.resize(
+                &state.gl_context,
+                NonZeroU32::new(win.pixel_w() as _).unwrap(),
+                NonZeroU32::new(win.pixel_h() as _).unwrap(),
+            );
+            state.canvas_size = [win.pixel_w() as u32, win.pixel_h() as u32];
+            state.set_visual_scale(win.pixels_per_unit());
             state._window_resized = true;
         }
 
@@ -410,11 +538,7 @@ pub fn translate_virtual_key_code(key: enums::Key) -> Option<egui::Key> {
 }
 
 /// Translates FLTK cursor to Egui cursors
-pub fn translate_cursor(
-    win: &mut GlWindow,
-    fused: &mut FusedCursor,
-    cursor_icon: egui::CursorIcon,
-) {
+pub fn translate_cursor(win: &mut Window, fused: &mut FusedCursor, cursor_icon: egui::CursorIcon) {
     let tmp_icon = match cursor_icon {
         CursorIcon::None => enums::Cursor::None,
         CursorIcon::Default => enums::Cursor::Arrow,

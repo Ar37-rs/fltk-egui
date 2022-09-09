@@ -4,11 +4,9 @@ use egui_backend::{
     fltk::{prelude::*, *},
     EguiImageConvertible, EguiSvgConvertible,
 };
-use fltk::{
-    enums::Mode,
-    image::{JpegImage, SvgImage},
-};
+use fltk::image::{JpegImage, SvgImage};
 use fltk_egui as egui_backend;
+use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 const SCREEN_WIDTH: u32 = 800;
@@ -16,8 +14,8 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = window::GlWindow::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None);
-    win.set_mode(Mode::Opengl3);
+    let mut win = window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None);
+    // win.set_mode(Mode::Opengl3);
     win.end();
     win.make_resizable(true);
     win.show();
@@ -98,9 +96,10 @@ fn main() {
                 &meshes,
                 &egui_output.textures_delta,
             );
+            // win.flush();
 
-            win.swap_buffers();
-            win.flush();
+            state.surface.swap_buffers(&state.gl_context).unwrap();
+            // win.swap_buffers();
             app::awake();
         }
 

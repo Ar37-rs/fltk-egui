@@ -1,12 +1,13 @@
 use egui_backend::{
     egui,
     egui_glow::glow,
-    fltk::{enums::*, prelude::*, *},
+    fltk::{prelude::*, *},
 };
 
 use egui_demo_lib::DemoWindows;
-use fltk::{app::App, window::GlutWindow};
+use fltk::{app::App, window::Window};
 use fltk_egui as egui_backend;
+use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 
@@ -15,7 +16,7 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = window::GlWindow::new(
+    let mut win = window::Window::new(
         100,
         100,
         SCREEN_WIDTH as _,
@@ -23,7 +24,6 @@ fn main() {
         Some("Demo window"),
     )
     .center_screen();
-    win.set_mode(Mode::Opengl3);
     win.end();
     win.make_resizable(true);
     win.show();
@@ -33,7 +33,7 @@ fn main() {
     run_egui(fltk_app, win, demo);
 }
 
-fn run_egui(fltk_app: App, mut win: GlutWindow, demo: DemoWindows) {
+fn run_egui(fltk_app: App, mut win: Window, demo: DemoWindows) {
     // Init backend
     let (mut painter, egui_state) = egui_backend::with_fltk(&mut win);
     let state = Rc::new(RefCell::new(egui_state));
@@ -86,8 +86,9 @@ fn run_egui(fltk_app: App, mut win: GlutWindow, demo: DemoWindows) {
                 &meshes,
                 &egui_output.textures_delta,
             );
-            win.swap_buffers();
-            win.flush();
+            state.surface.swap_buffers(&state.gl_context).unwrap();
+            // win.swap_buffers();
+            // win.flush();
             app::awake();
         }
     }

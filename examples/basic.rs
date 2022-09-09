@@ -3,8 +3,8 @@ use egui_backend::{
     egui_glow::glow,
     fltk::{prelude::*, *},
 };
-use fltk::enums::Mode;
 use fltk_egui as egui_backend;
+use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 const SCREEN_WIDTH: u32 = 800;
@@ -12,9 +12,8 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = window::GlWindow::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None)
-        .center_screen();
-    win.set_mode(Mode::Opengl3);
+    let mut win =
+        window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None).center_screen();
     win.end();
     win.make_resizable(true);
     win.show();
@@ -59,7 +58,6 @@ fn main() {
         // Clear the screen to dark red
         let gl = painter.gl().as_ref();
         draw_background(gl);
-
         let mut state = state.borrow_mut();
         state.input.time = Some(start_time.elapsed().as_secs_f64());
         let egui_output = egui_ctx.run(state.take_input(), |ctx| {
@@ -96,8 +94,8 @@ fn main() {
                 &egui_output.textures_delta,
             );
 
-            win.swap_buffers();
-            win.flush();
+            state.surface.swap_buffers(&state.gl_context).unwrap();
+            // let _ = state.surface.set_swap_interval(&state.gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()));
             app::awake();
         }
 

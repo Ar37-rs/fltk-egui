@@ -1,11 +1,12 @@
 use egui_backend::{
     egui::{Color32, ColorImage, Image, TextureHandle},
     egui_glow::glow,
-    fltk::{enums::*, prelude::*, *},
+    fltk::{prelude::*, *},
     ColorImageExt, TextureHandleExt,
 };
 
 use fltk_egui as egui_backend;
+use glutin::surface::GlSurface;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
@@ -18,9 +19,9 @@ const PIC_HEIGHT: i32 = 192;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = window::GlWindow::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None)
-        .center_screen();
-    win.set_mode(Mode::MultiSample);
+    let mut win =
+        window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None).center_screen();
+    // win.set_mode(Mode::MultiSample);
     win.end();
     win.make_resizable(true);
     win.show();
@@ -139,7 +140,7 @@ fn main() {
                 &egui_output.textures_delta,
             );
 
-            win.swap_buffers();
+            state.surface.swap_buffers(&state.gl_context).unwrap();
             win.flush();
             app::awake();
         }
