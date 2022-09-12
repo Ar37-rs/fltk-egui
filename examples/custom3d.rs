@@ -2,10 +2,10 @@ use egui_backend::{
     egui,
     egui_glow::glow,
     fltk::{prelude::*, *},
+    GlSurface, Api,
 };
-use fltk::app::App;
+use fltk::{app::App, window::GlWindow};
 use fltk_egui as egui_backend;
-use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 use three_d::*;
@@ -15,7 +15,7 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = fltk::window::Window::new(
+    let mut win = fltk::window::GlWindow::new(
         100,
         100,
         SCREEN_WIDTH as _,
@@ -23,7 +23,7 @@ fn main() {
         Some("Demo window"),
     )
     .center_screen();
-    // win.set_mode(Mode::Opengl3);
+    win.set_mode(enums::Mode::MultiSample | enums::Mode::Alpha);
     win.end();
     win.make_resizable(true);
     win.show();
@@ -32,10 +32,11 @@ fn main() {
     run_egui(fltk_app, win);
 }
 
-fn run_egui(fltk_app: App, mut win: fltk::window::Window) {
+fn run_egui(fltk_app: App, mut win: GlWindow) {
     // Init backend
-    let (mut painter, egui_state) = egui_backend::with_fltk(&mut win);
+    let (painter, egui_state) = egui_backend::with_fltk(&mut win, Api::OPENGL, true);
     let state = Rc::new(RefCell::new(egui_state));
+    let painter = Rc::new(RefCell::new(painter));
 
     win.handle({
         let state = state.clone();
@@ -62,74 +63,84 @@ fn run_egui(fltk_app: App, mut win: fltk::window::Window) {
 
     let egui_ctx = egui::Context::default();
     let start_time = Instant::now();
-
     let mut angle = 45f32;
-    while fltk_app.wait() {
-        // Clear the screen to dark red
-        let gl = painter.gl().as_ref();
-        draw_background(gl);
+    win.draw({
+        let painter = painter.clone();
+        move |win| {
+            let mut state = state.borrow_mut();
+            let mut painter = painter.borrow_mut();
 
-        let mut state = state.borrow_mut();
-        state.input.time = Some(start_time.elapsed().as_secs_f64());
-        let egui_output = egui_ctx.run(state.take_input(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                egui::widgets::global_dark_light_mode_buttons(ui);
+            // Clear the screen to dark red
+            let gl = painter.gl().as_ref();
+            draw_background(gl);
+            state.input.time = Some(start_time.elapsed().as_secs_f64());
+            let egui_output = egui_ctx.run(state.take_input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::widgets::global_dark_light_mode_buttons(ui);
 
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label("The triangle is being painted using ");
-                    ui.hyperlink_to("three-d", "https://github.com/asny/three-d");
-                    ui.label(".");
-                });
-
-                egui::ScrollArea::both().show(ui, |ui| {
-                    egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                        let (rect, response) =
-                            ui.allocate_exact_size(egui::Vec2::splat(512.0), egui::Sense::drag());
-
-                        angle += response.drag_delta().x * 0.01;
-
-                        let callback = egui::PaintCallback {
-                            rect,
-                            callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
-                                move |info, painter| {
-                                    with_three_d(painter.gl(), |three_d| {
-                                        three_d.frame(
-                                            FrameInput::new(&three_d.context, &info, painter),
-                                            angle,
-                                        );
-                                    });
-                                },
-                            )),
-                        };
-                        ui.painter().add(callback);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label("The triangle is being painted using ");
+                        ui.hyperlink_to("three-d", "https://github.com/asny/three-d");
+                        ui.label(".");
                     });
-                    ui.label("Drag to rotate!");
+
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        egui::Frame::canvas(ui.style()).show(ui, |ui| {
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::Vec2::splat(512.0), egui::Sense::drag());
+
+                            angle += response.drag_delta().x * 0.01;
+
+                            let callback = egui::PaintCallback {
+                                rect,
+                                callback: std::sync::Arc::new(egui_glow::CallbackFn::new(
+                                    move |info, painter| {
+                                        with_three_d(painter.gl(), |three_d| {
+                                            three_d.frame(
+                                                FrameInput::new(&three_d.context, &info, painter),
+                                                angle,
+                                            );
+                                        });
+                                    },
+                                )),
+                            };
+                            ui.painter().add(callback);
+                        });
+                        ui.label("Drag to rotate!");
+                    });
                 });
             });
-        });
 
-        if egui_output.repaint_after.is_zero() || state.window_resized() {
-            //Draw egui texture
-            state.fuse_output(&mut win, egui_output.platform_output);
-            let meshes = egui_ctx.tessellate(egui_output.shapes);
-            painter.paint_and_update_textures(
-                state.canvas_size,
-                state.pixels_per_point(),
-                &meshes,
-                &egui_output.textures_delta,
-            );
-            state.surface.swap_buffers(&state.gl_context).unwrap();
-            // win.flush();
-            app::awake();
+            if egui_output.repaint_after.is_zero() || state.window_resized() {
+                //Draw egui texture
+                state.fuse_output(win, egui_output.platform_output);
+                let meshes = egui_ctx.tessellate(egui_output.shapes);
+                painter.paint_and_update_textures(
+                    state.canvas_size,
+                    state.pixels_per_point(),
+                    &meshes,
+                    &egui_output.textures_delta,
+                );
+                state.surface.swap_buffers(&state.gl_context).unwrap();
+                app::awake();
+            }
         }
+    });
+
+    let mut count = 0;
+    while fltk_app.wait() {
+        println!("flushing windows... {} times", count);
+        win.flush();
+        count += 1;
     }
 
-    painter.destroy();
+    painter.borrow_mut().destroy();
 }
 
 fn draw_background<GL: glow::HasContext>(gl: &GL) {
     unsafe {
+        gl.enable(glow::MULTISAMPLE);
         gl.clear_color(0.6, 0.3, 0.3, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.clear(glow::DEPTH_BUFFER_BIT);

@@ -2,9 +2,9 @@ use egui_backend::{
     egui,
     egui_glow::glow,
     fltk::{prelude::*, *},
+    Api, GlSurface,
 };
 use fltk_egui as egui_backend;
-use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 const SCREEN_WIDTH: u32 = 800;
@@ -12,15 +12,16 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win =
-        window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None).center_screen();
+    let mut win = window::GlWindow::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None)
+        .center_screen();
+    win.set_mode(enums::Mode::MultiSample);
     win.end();
     win.make_resizable(true);
     win.show();
     win.make_current();
 
     // Init backend
-    let (mut painter, mut egui_state) = egui_backend::with_fltk(&mut win);
+    let (mut painter, mut egui_state) = egui_backend::with_fltk(&mut win, Api::OPENGL, true);
     // Set visual scale or egui display scaling
     egui_state.set_visual_scale(1.5);
     let state = Rc::from(RefCell::from(egui_state));
@@ -54,57 +55,65 @@ fn main() {
     let mut age: i32 = 17;
     let mut name: String = "".to_string();
 
-    while fltk_app.wait() {
-        // Clear the screen to dark red
-        let gl = painter.gl().as_ref();
-        draw_background(gl);
-        let mut state = state.borrow_mut();
-        state.input.time = Some(start_time.elapsed().as_secs_f64());
-        let egui_output = egui_ctx.run(state.take_input(), |ctx| {
-            egui::CentralPanel::default().show(&ctx, |ui| {
-                ui.heading("My egui Application");
-                ui.horizontal(|ui| {
-                    ui.label("Your name: ");
-                    ui.text_edit_singleline(&mut name);
+    win.draw({
+        let state = state.clone();
+        move |win| {
+            // Clear the screen to dark red
+            let gl = painter.gl().as_ref();
+            draw_background(gl);
+            let mut state = state.borrow_mut();
+            state.input.time = Some(start_time.elapsed().as_secs_f64());
+            let egui_output = egui_ctx.run(state.take_input(), |ctx| {
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    ui.heading("My egui Application");
+                    ui.horizontal(|ui| {
+                        ui.label("Your name: ");
+                        ui.text_edit_singleline(&mut name);
+                    });
+                    ui.add(egui::Slider::new(&mut age, 0..=120).text("age"));
+                    if ui.button("Click each year").clicked() {
+                        age += 1;
+                    }
+                    ui.label(format!("Hello '{}', age {}", name, age));
+                    ui.separator();
+                    if ui
+                        .button("Quit?")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        quit = true;
+                    }
                 });
-                ui.add(egui::Slider::new(&mut age, 0..=120).text("age"));
-                if ui.button("Click each year").clicked() {
-                    age += 1;
-                }
-                ui.label(format!("Hello '{}', age {}", name, age));
-                ui.separator();
-                if ui
-                    .button("Quit?")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    quit = true;
-                }
             });
-        });
 
-        if egui_output.repaint_after.is_zero() || state.window_resized() {
-            state.fuse_output(&mut win, egui_output.platform_output);
-            let meshes = egui_ctx.tessellate(egui_output.shapes);
+            if egui_output.repaint_after.is_zero() || state.window_resized() {
+                state.fuse_output(win, egui_output.platform_output);
+                let meshes = egui_ctx.tessellate(egui_output.shapes);
 
-            painter.paint_and_update_textures(
-                state.canvas_size,
-                state.pixels_per_point(),
-                &meshes,
-                &egui_output.textures_delta,
-            );
+                painter.paint_and_update_textures(
+                    state.canvas_size,
+                    state.pixels_per_point(),
+                    &meshes,
+                    &egui_output.textures_delta,
+                );
 
-            state.surface.swap_buffers(&state.gl_context).unwrap();
-            // let _ = state.surface.set_swap_interval(&state.gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()));
-            app::awake();
+                state.surface.swap_buffers(&state.gl_context).unwrap();
+                app::awake();
+            }
+
+            if quit {
+                painter.destroy();
+                app::quit();
+            }
         }
+    });
 
-        if quit {
-            break;
-        }
+    let mut count = 0;
+    while fltk_app.wait() {
+        println!("flushing windows... {} times", count);
+        win.flush();
+        count += 1;
     }
-
-    painter.destroy();
 }
 
 fn draw_background<GL: glow::HasContext>(gl: &GL) {

@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![warn(clippy::all)]
 
-use std::{ffi::CString, num::NonZeroU32, sync::Arc, time::Instant};
+use std::{ffi::CString, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Instant};
 
 // Re-export dependencies.
 pub use egui;
@@ -12,15 +12,19 @@ pub use egui_image::RetainedEguiImage;
 pub use fltk;
 use fltk::{
     app, enums,
-    prelude::{FltkError, ImageExt, WidgetExt, WindowExt},
-    window::Window,
+    prelude::{FltkError, ImageExt, WindowExt},
 };
+pub use glutin;
+pub use glutin::config::Api;
+pub use glutin::surface::GlSurface;
 use glutin::{
     context::{ContextAttributesBuilder, PossiblyCurrentContext},
     prelude::{GlDisplay, NotCurrentGlContextSurfaceAccessor},
-    surface::{GlSurface, Surface, WindowSurface},
+    surface::{Surface, SwapInterval, WindowSurface},
 };
-use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle};
+use raw_window_handle::{
+    HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
+};
 mod support;
 use support::*;
 mod clipboard;
@@ -29,7 +33,7 @@ use clipboard::Clipboard;
 
 /// Stuct Compat for RawDisplayHandle 5.x
 ///
-pub struct RdhCompat<'a>(&'a fltk::window::Window);
+pub struct RdhCompat<'a, W: WindowExt>(&'a W);
 
 /// Trait Compat for RawDisplayHandle 5.x
 ///
@@ -39,34 +43,50 @@ pub trait RawDisplayHandleExt {
 
 impl RawDisplayHandleExt for fltk::window::Window {
     fn raw_display_handle(&self) -> RawDisplayHandle {
-        RdhCompat(&self).raw_display_handle()
+        RdhCompat(self).raw_display_handle()
     }
 }
 
-unsafe impl HasRawDisplayHandle for RdhCompat<'_> {
+impl RawDisplayHandleExt for fltk::window::GlWindow {
+    fn raw_display_handle(&self) -> RawDisplayHandle {
+        RdhCompat(self).raw_display_handle()
+    }
+}
+
+pub trait RawWindowHandleExt {
+    fn raw_window_handle(&self) -> RawWindowHandle;
+}
+
+impl RawWindowHandleExt for fltk::window::Window {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        RdhCompat(self).raw_window_handle()
+    }
+}
+
+impl RawWindowHandleExt for fltk::window::GlWindow {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        RdhCompat(self).raw_window_handle()
+    }
+}
+
+unsafe impl<W: WindowExt> HasRawDisplayHandle for RdhCompat<'_, W> {
     fn raw_display_handle(&self) -> RawDisplayHandle {
         #[cfg(target_os = "windows")]
         {
-            let mut dispaly_handle = raw_window_handle::WindowsDisplayHandle::empty();
-            dispaly_handle.display = fltk::app::display();
-            dispaly_handle.screen = self.0.screen_num();
-            return raw_window_handle::RawDisplayHandle::Windows(handle);
+            let dispaly_handle = raw_window_handle::WindowsDisplayHandle::empty();
+            return raw_window_handle::RawDisplayHandle::Windows(dispaly_handle);
         }
 
         #[cfg(target_os = "macos")]
         {
-            let mut dispaly_handle = raw_window_handle::AppKitDisplayHandle::empty();
-            dispaly_handle.display = fltk::app::display();
-            dispaly_handle.screen = self.0.screen_num();
-            return RawDisplayHandle::AppKit(handle);
+            let dispaly_handle = raw_window_handle::AppKitDisplayHandle::empty();
+            return RawDisplayHandle::AppKit(dispaly_handle);
         }
 
         #[cfg(target_os = "android")]
         {
-            let mut dispaly_handle = raw_window_handle::AndroidDisplayHandle::empty();
-            dispaly_handle.display = fltk::app::display();
-            dispaly_handle.screen = self.0.screen_num();
-            return raw_window_handle::RawDisplayHandle::Android(handle);
+            let dispaly_handle = raw_window_handle::AndroidDisplayHandle::empty();
+            return raw_window_handle::RawDisplayHandle::Android(dispaly_handle);
         }
 
         #[cfg(any(
@@ -89,25 +109,107 @@ unsafe impl HasRawDisplayHandle for RdhCompat<'_> {
             {
                 let mut dispaly_handle = raw_window_handle::WaylandDisplayHandle::empty();
                 dispaly_handle.display = fltk::app::display();
-                dispaly_handle.screen = self.0.screen_num();
                 return raw_window_handle::RawDisplayHandle::Wayland(dispaly_handle);
             }
         }
     }
 }
 
+unsafe impl<W: WindowExt> HasRawWindowHandle for RdhCompat<'_, W> {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        #[cfg(target_os = "windows")]
+        {
+            let mut handle = raw_window_handle::Win32WindowHandle::empty();
+            handle.hwnd = self.0.raw_handle();
+            handle.hinstance = fltk::app::display();
+            return RawWindowHandle::Win32(handle);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let raw = self.0.raw_handle();
+            extern "C" {
+                pub fn cfltk_getContentView(xid: *mut raw::c_void) -> *mut raw::c_void;
+            }
+            let cv = unsafe { cfltk_getContentView(raw) };
+            let mut handle = raw_window_handle::AppKitWindowHandle::empty();
+            handle.ns_window = raw;
+            handle.ns_view = cv as _;
+            return RawWindowHandle::AppKit(handle);
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let mut handle = raw_window_handle::AndroidNdkWindowHandle::empty();
+            handle.a_native_window = self.0.raw_handle();
+            return RawWindowHandle::AndroidNdk(handle);
+        }
+
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+        ))]
+        {
+            #[cfg(not(feature = "use-wayland"))]
+            {
+                let mut handle = raw_window_handle::XlibWindowHandle::empty();
+                handle.window = self.0.raw_handle();
+                return RawWindowHandle::Xlib(handle);
+            }
+
+            #[cfg(feature = "use-wayland")]
+            {
+                let mut handle = WaylandWindowHandle::empty();
+                handle.surface = self.0.raw_handle();
+                return RawWindowHandle::Wayland(handle);
+            }
+        }
+    }
+}
+
+enum _PPU {}
+
+impl _PPU {
+    fn pixels_per_unit<W: WindowExt + PPU>(w: &W) -> f32 {
+        w.pixels_per_unit()
+    }
+}
+
+/// Pixel per unit trait
+pub trait PPU {
+    fn pixels_per_unit(&self) -> f32;
+}
+
+impl PPU for fltk::window::Window {
+    fn pixels_per_unit(&self) -> f32 {
+        // to avoid recursion using enum
+        _PPU::pixels_per_unit(self)
+    }
+}
+
+impl PPU for fltk::window::GlWindow {
+    fn pixels_per_unit(&self) -> f32 {
+        self.pixels_per_unit()
+    }
+}
+
 /// Construct the backend.
-pub fn with_fltk(win: &mut Window) -> (Painter, EguiState) {
+pub fn with_fltk<W: WindowExt + RawDisplayHandleExt + RawWindowHandleExt + PPU>(
+    win: &mut W,
+    api: Api,
+    vsync: bool,
+) -> (Painter, EguiState<W>) {
     app::set_screen_scale(win.screen_num(), 1.);
     app::keyboard_screen_scaling(false);
-    // let gl = unsafe { glow::Context::from_loader_function(|s| win.get_proc_address(s) as _) };
     let raw_window_handle = win.raw_window_handle();
     let gl_display = create_display(win.raw_display_handle(), raw_window_handle);
-    let template = config_template(raw_window_handle);
+    let template = config_template(api, raw_window_handle);
     let config = unsafe { gl_display.find_configs(template).unwrap().next().unwrap() };
     let surface = {
-        // let p = winit::platform::unix::register_xlib_error_hook;
-        let attrs = surface_attributes(&win);
+        let attrs = surface_attributes(win);
         unsafe { gl_display.create_window_surface(&config, &attrs).unwrap() }
     };
 
@@ -130,11 +232,19 @@ pub fn with_fltk(win: &mut Window) -> (Painter, EguiState) {
     };
 
     // Try setting vsync.
-    // if let Err(res) =
-    //     surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
-    // {
-    //     eprintln!("Error setting vsync: {:?}", res);
-    // }
+    if vsync {
+        if let Err(res) =
+            surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
+        {
+            eprintln!("Error setting vsync: {:?}", res);
+        }
+    } else {
+        if let Err(res) =
+            surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(0).unwrap()))
+        {
+            eprintln!("Error setting vsync: {:?}", res);
+        }
+    }
 
     let painter = Painter::new(Arc::from(gl), None, "")
         .unwrap_or_else(|error| panic!("some OpenGL error occurred {}\n", error));
@@ -178,7 +288,7 @@ impl Default for FusedCursor {
 }
 
 /// Shuttles FLTK's input and events to Egui
-pub struct EguiState {
+pub struct EguiState<W: WindowExt + PPU> {
     pub canvas_size: [u32; 2],
     pub clipboard: Clipboard,
     pub fuse_cursor: FusedCursor,
@@ -195,16 +305,17 @@ pub struct EguiState {
     pub max_texture_side: usize,
     pub surface: Surface<WindowSurface>,
     pub gl_context: PossiblyCurrentContext,
+    _pdata: PhantomData<W>,
 }
 
-impl EguiState {
+impl<W: PPU + WindowExt> EguiState<W> {
     /// Construct a new state
     pub fn new(
-        win: &Window,
+        win: &W,
         surface: Surface<WindowSurface>,
         max_texture_side: usize,
         gl_context: PossiblyCurrentContext,
-    ) -> EguiState {
+    ) -> EguiState<W> {
         let ppu = win.pixels_per_unit();
         let (width, height) = (win.width(), win.height());
         let rect = vec2(width as f32, height as f32) / ppu;
@@ -227,6 +338,7 @@ impl EguiState {
             scroll_factor: 12.0,
             zoom_factor: 8.0,
             _window_resized: false,
+            _pdata: PhantomData,
         }
     }
 
@@ -253,12 +365,12 @@ impl EguiState {
     }
 
     /// Conveniece method bundling the necessary components for input/event handling
-    pub fn fuse_input(&mut self, win: &mut Window, event: enums::Event) {
+    pub fn fuse_input(&mut self, win: &mut W, event: enums::Event) {
         input_to_egui(win, event, self);
     }
 
     /// Convenience method for outputting what egui emits each frame
-    pub fn fuse_output(&mut self, win: &mut Window, egui_output: egui::PlatformOutput) {
+    pub fn fuse_output(&mut self, win: &mut W, egui_output: egui::PlatformOutput) {
         if !egui_output.copied_text.is_empty() {
             self.clipboard.set(egui_output.copied_text);
         }
@@ -269,7 +381,7 @@ impl EguiState {
     }
 
     /// Convenience method for outputting what egui emits each frame (borrow PlatformOutput)
-    pub fn fuse_output_borrow(&mut self, win: &mut Window, egui_output: &egui::PlatformOutput) {
+    pub fn fuse_output_borrow(&mut self, win: &mut W, egui_output: &egui::PlatformOutput) {
         if !egui_output.copied_text.is_empty() {
             app::copy(&egui_output.copied_text);
         }
@@ -293,21 +405,21 @@ impl EguiState {
 }
 
 /// Handles input/events from FLTK
-pub fn input_to_egui(
-    win: &mut Window,
+pub fn input_to_egui<W: PPU + WindowExt>(
+    win: &mut W,
     event: enums::Event,
-    state: &mut EguiState,
+    state: &mut EguiState<W>,
     // painter: &mut Painter,
 ) {
     match event {
         enums::Event::Resize => {
             state.surface.resize(
                 &state.gl_context,
-                NonZeroU32::new(win.pixel_w() as _).unwrap(),
-                NonZeroU32::new(win.pixel_h() as _).unwrap(),
+                NonZeroU32::new(win.width() as _).unwrap(),
+                NonZeroU32::new(win.height() as _).unwrap(),
             );
-            state.canvas_size = [win.pixel_w() as u32, win.pixel_h() as u32];
-            state.set_visual_scale(win.pixels_per_unit());
+            state.canvas_size = [win.width() as u32, win.height() as u32];
+            state.set_visual_scale(state.pixels_per_point());
             state._window_resized = true;
         }
 
@@ -538,7 +650,11 @@ pub fn translate_virtual_key_code(key: enums::Key) -> Option<egui::Key> {
 }
 
 /// Translates FLTK cursor to Egui cursors
-pub fn translate_cursor(win: &mut Window, fused: &mut FusedCursor, cursor_icon: egui::CursorIcon) {
+pub fn translate_cursor<W: WindowExt>(
+    win: &mut W,
+    fused: &mut FusedCursor,
+    cursor_icon: egui::CursorIcon,
+) {
     let tmp_icon = match cursor_icon {
         CursorIcon::None => enums::Cursor::None,
         CursorIcon::Default => enums::Cursor::Arrow,

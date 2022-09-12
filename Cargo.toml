@@ -17,8 +17,8 @@ build = "build.rs"
 egui = "0.19"
 egui_glow = { version = "0.19", default-features = false }
 arboard = { version = "2", default-features = false }
-fltk = { version = "1.3", features = ["raw-window-handle"] }
-glutin = { git = "https://github.com/rust-windowing/glutin.git", rev = "5c121bc43bb57c5af6523aa5b44bbdb42921a8b0" }
+fltk = { version = "1.3", features = ["raw-window-handle", "enable-glwindow"] }
+glutin = { git = "https://github.com/rust-windowing/glutin.git", rev = "24812ca" }
 raw-window-handle = "0.5"
 
 [build-dependencies]

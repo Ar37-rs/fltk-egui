@@ -2,9 +2,10 @@ use egui_backend::{
     egui,
     egui_glow::glow,
     fltk::{enums::*, prelude::*, *},
+    GlSurface,
+    Api
 };
 use fltk_egui as egui_backend;
-use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 
@@ -17,8 +18,8 @@ fn main() {
     app::set_font_size(20);
     let mut main_win =
         window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None).center_screen();
-    let mut gl_win = window::Window::new(5, 5, main_win.w() - 200, main_win.h() - 10, None);
-    // gl_win.set_mode(Mode::Opengl3);
+    let mut gl_win = window::GlWindow::new(5, 5, main_win.w() - 200, main_win.h() - 10, None);
+    gl_win.set_mode(Mode::Opengl3);
     gl_win.end();
     let mut col = group::Flex::default()
         .column()
@@ -42,13 +43,12 @@ fn main() {
     gl_win.make_current();
 
     // Init backend
-    let (mut painter, egui_state) = egui_backend::with_fltk(&mut gl_win);
+    let (mut painter, egui_state) = egui_backend::with_fltk(&mut gl_win, Api::OPENGL, true);
     let state = Rc::from(RefCell::from(egui_state));
 
-    main_win.handle({
+    gl_win.handle({
         let state = state.clone();
-        let mut w = gl_win.clone();
-        move |_win, ev| match ev {
+        move |win, ev| match ev {
             enums::Event::Push
             | enums::Event::Released
             | enums::Event::KeyDown
@@ -58,7 +58,7 @@ fn main() {
             | enums::Event::Move
             | enums::Event::Drag => {
                 if let Ok(mut state) = state.try_borrow_mut() {
-                    state.fuse_input(&mut w, ev);
+                    state.fuse_input(win, ev);
                     true
                 } else {
                     false
@@ -77,11 +77,10 @@ fn main() {
     let mut age: i32 = 0;
     let mut quit = false;
 
-    while fltk_app.wait() {
+    gl_win.draw(move |gl_win| {
         // Clear the screen to dark red
         let gl = painter.gl().as_ref();
         draw_background(gl);
-
         let mut state = state.borrow_mut();
         state.input.time = Some(start_time.elapsed().as_secs_f64());
         frm.set_label(&format!("Hello {}", &name));
@@ -109,13 +108,8 @@ fn main() {
             });
         });
 
-        // Using "if let ..." for safety.
-        if gl_win.damage() {
-            gl_win.clear_damage();
-        }
-
         if egui_output.repaint_after.is_zero() || state.window_resized() {
-            state.fuse_output(&mut gl_win, egui_output.platform_output);
+            state.fuse_output(gl_win, egui_output.platform_output);
             let meshes = egui_ctx.tessellate(egui_output.shapes);
 
             painter.paint_and_update_textures(
@@ -125,17 +119,24 @@ fn main() {
                 &egui_output.textures_delta,
             );
 
-            // gl_win.swap_buffers();
             state.surface.swap_buffers(&state.gl_context).unwrap();
             app::awake();
+        } else {
+            app::sleep(0.016);
         }
 
         if quit {
-            break;
+            painter.destroy();
+            app::quit();
         }
-    }
+    });
 
-    painter.destroy();
+    let mut count = 0;
+    while fltk_app.wait() {
+        println!("flushing windows... {} times", count);
+        gl_win.flush();
+        count += 1;
+    }
 }
 
 fn draw_background<GL: glow::HasContext>(gl: &GL) {

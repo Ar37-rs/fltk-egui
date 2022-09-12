@@ -3,36 +3,37 @@
 
 use std::num::NonZeroU32;
 
-use fltk::prelude::WidgetExt;
-use fltk::window::Window;
-use raw_window_handle::{HasRawWindowHandle, RawDisplayHandle, RawWindowHandle};
+use fltk::prelude::WindowExt;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use glutin::config::{ConfigSurfaceTypes, ConfigTemplate, ConfigTemplateBuilder};
+use glutin::config::{Api, ConfigSurfaceTypes, ConfigTemplate, ConfigTemplateBuilder};
 use glutin::display::{Display, DisplayApiPreference};
 use glutin::surface::{SurfaceAttributes, SurfaceAttributesBuilder, WindowSurface};
 
+use crate::RawWindowHandleExt;
+
 /// Create template to find OpenGL config.
-pub fn config_template(raw_window_handle: RawWindowHandle) -> ConfigTemplate {
+pub fn config_template(api: Api,raw_window_handle: RawWindowHandle) -> ConfigTemplate {
     ConfigTemplateBuilder::new()
         .with_alpha_size(8)
-        .with_transparency(true)
-        .with_depth_size(8)
-        .prefer_hardware_accelerated(Some(true))
+        // .with_transparency(true)
+        // .with_multisampling(8)
         .compatible_with_native_window(raw_window_handle)
-        .with_surface_type(ConfigSurfaceTypes::all())
+        .with_surface_type(ConfigSurfaceTypes::WINDOW)
         .build()
 }
 
 /// Create surface attributes for window surface.
-pub fn surface_attributes(window: &Window) -> SurfaceAttributes<WindowSurface> {
-    let (width, height): (u32, u32) = (window.width() as _, window.height() as _);
+pub fn surface_attributes<W: WindowExt + RawWindowHandleExt>(
+    window: &W,
+) -> SurfaceAttributes<WindowSurface> {
     let raw_window_handle = window.raw_window_handle();
     SurfaceAttributesBuilder::<WindowSurface>::new()
         .with_srgb(Some(true))
         .build(
             raw_window_handle,
-            NonZeroU32::new(width).unwrap(),
-            NonZeroU32::new(height).unwrap(),
+            NonZeroU32::new(window.width() as _).unwrap(),
+            NonZeroU32::new(window.height() as _).unwrap(),
         )
 }
 

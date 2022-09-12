@@ -2,11 +2,10 @@ use egui_backend::{
     egui::{self, Label},
     egui_glow::glow,
     fltk::{prelude::*, *},
-    EguiImageConvertible, EguiSvgConvertible,
+    Api, EguiImageConvertible, EguiSvgConvertible, GlSurface,
 };
 use fltk::image::{JpegImage, SvgImage};
 use fltk_egui as egui_backend;
-use glutin::surface::GlSurface;
 use std::rc::Rc;
 use std::{cell::RefCell, time::Instant};
 const SCREEN_WIDTH: u32 = 800;
@@ -14,7 +13,7 @@ const SCREEN_HEIGHT: u32 = 600;
 
 fn main() {
     let fltk_app = app::App::default();
-    let mut win = window::Window::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None);
+    let mut win = window::GlWindow::new(100, 100, SCREEN_WIDTH as _, SCREEN_HEIGHT as _, None);
     // win.set_mode(Mode::Opengl3);
     win.end();
     win.make_resizable(true);
@@ -22,7 +21,7 @@ fn main() {
     win.make_current();
 
     // Init backend
-    let (mut painter, egui_state) = egui_backend::with_fltk(&mut win);
+    let (mut painter, egui_state) = egui_backend::with_fltk(&mut win, Api::OPENGL, true);
     let state = Rc::from(RefCell::from(egui_state));
 
     win.handle({
@@ -61,11 +60,10 @@ fn main() {
     let start_time = Instant::now();
     let mut quit = false;
 
-    while fltk_app.wait() {
+    win.draw(move |win| {
         // Clear the screen to dark red
         let gl = painter.gl().as_ref();
         draw_background(gl);
-
         let mut state = state.borrow_mut();
         state.input.time = Some(start_time.elapsed().as_secs_f64());
         let egui_output = egui_ctx.run(state.take_input(), |ctx| {
@@ -87,7 +85,7 @@ fn main() {
         });
 
         if egui_output.repaint_after.is_zero() || state.window_resized() {
-            state.fuse_output(&mut win, egui_output.platform_output);
+            state.fuse_output(win, egui_output.platform_output);
             let meshes = egui_ctx.tessellate(egui_output.shapes);
 
             painter.paint_and_update_textures(
@@ -96,19 +94,22 @@ fn main() {
                 &meshes,
                 &egui_output.textures_delta,
             );
-            // win.flush();
-
             state.surface.swap_buffers(&state.gl_context).unwrap();
-            // win.swap_buffers();
             app::awake();
         }
 
         if quit {
-            break;
+            painter.destroy();
+            app::quit();
         }
-    }
+    });
 
-    painter.destroy();
+    let mut count = 0;
+    while fltk_app.wait() {
+        println!("flushing windows... {} times", count);
+        win.flush();
+        count += 1;
+    }
 }
 
 fn draw_background<GL: glow::HasContext>(gl: &GL) {

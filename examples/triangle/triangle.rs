@@ -105,7 +105,8 @@ impl Triangle {
         }
     }
 
-    pub fn free(self, gl: &glow::Context) {
+    // To avoid rustc complaining, changed to `&self mut`
+    pub fn free(&mut self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.program);
             gl.delete_buffer(self.vbo);
